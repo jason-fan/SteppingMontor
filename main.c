@@ -124,6 +124,19 @@ static void key_onclick(KEY_t *self)
     }
 }
 
+/* Click: toggle motor STOP */
+static void key_ondbclick(KEY_t *self)
+{
+    (void)self;
+    if (motor.isRunning(&motor)) {
+        motor.stop(&motor);
+        led_run.off(&led_run);
+        uart.puts(&uart, "MOTOR STOP\r\n");
+    }
+    beep.once(&beep, 1, 100);      /* stop  tone: 1kHz / 100ms */
+}
+
+
 /* Long-press: toggle rotation direction, update reverse LED */
 static void key_onlongpress(KEY_t *self)
 {
@@ -231,6 +244,7 @@ int main(void)
     /* Bind key callbacks: click = start/stop toggle,
      *                    long-press = direction toggle */
     key.onclick     = &key_onclick;
+    key.ondblclick = &key_ondbclick;
     key.onlongpress = &key_onlongpress;
 
     /* Power-on default: both LEDs OFF (lit only on actual action).
