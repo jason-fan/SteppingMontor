@@ -1,0 +1,78 @@
+#==============================================================================#
+# STM8S103F3P6 Stepper Motor Control - Makefile for SDCC
+#==============================================================================#
+
+# Toolchain
+CC       = sdcc
+PROGRAMMER = stm8flash
+
+# Target MCU
+MCU      = stm8s103f3
+
+# Project name
+PROJECT  = project2
+
+# Source files
+SRCS     = main.c motor.c key.c adc.c uart.c led.c beep.c
+
+# Compiler flags
+CFLAGS   = -mstm8 --std-c99 -I./
+
+# Output files
+IHX      = $(PROJECT).ihx
+HEX      = $(PROJECT).hex
+LST      = $(PROJECT).lst
+MAP      = $(PROJECT).map
+CDB      = $(PROJECT).cdb
+
+#==============================================================================#
+# Build targets
+#==============================================================================#
+
+.PHONY: all clean flash size
+
+all: $(IHX)
+
+$(IHX): $(SRCS)
+	$(CC) $(CFLAGS) -c main.c
+	$(CC) $(CFLAGS) -c motor.c
+	$(CC) $(CFLAGS) -c key.c
+	$(CC) $(CFLAGS) -c adc.c
+	$(CC) $(CFLAGS) -c uart.c
+	$(CC) $(CFLAGS) -c led.c
+	$(CC) $(CFLAGS) -c beep.c
+	$(CC) $(CFLAGS) main.rel motor.rel key.rel adc.rel uart.rel led.rel beep.rel -o $@
+
+# Generate Intel HEX from IHX
+hex: $(IHX)
+	packihx $(IHX) > $(HEX)
+
+# Show memory usage
+size: $(IHX)
+	@echo "----------------------------------------"
+	@echo "  Memory usage:"
+	@echo "  Flash:  up to 8 KB (0x8000 - 0x9FFF)"
+	@echo "  RAM:    up to 1 KB"
+	@echo "----------------------------------------"
+
+# Flash the chip via ST-LINK/V2
+flash: $(IHX)
+	$(PROGRAMMER) -c stlinkv2 -p $(MCU) -w $<
+
+# Flash via serial bootloader (UART1)
+flash_uart: $(IHX)
+	stm8gal -p /dev/ttyUSB0 -w $< -R 3
+
+# Clean build artifacts
+clean:
+	rm -f *.ihx *.hex *.lk *.lst *.map *.sym *.cdb *.asm *.rel *.rst
+
+# Show help
+help:
+	@echo "Available targets:"
+	@echo "  all         Build the project (default)"
+	@echo "  hex         Generate Intel HEX file"
+	@echo "  size        Show memory usage info"
+	@echo "  flash       Flash via ST-LINK/V2 (stm8flash)"
+	@echo "  flash_uart  Flash via UART bootloader (stm8gal)"
+	@echo "  clean       Remove all build artifacts"
