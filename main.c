@@ -9,7 +9,7 @@
  *   KEY       PD3  -> single button (active low, pull-up, TSSOP20 pin2)
  *                    click    : toggle motor RUN / STOP
  *                    long-press: toggle CW / CCW
- *   MOTOR     PB4=IN1 PB5=IN2 PC5=IN3 PC6=IN4  (L9110s/ULN2003 driver board)
+ *   MOTOR     PC3=IN1 PC7=IN2 PC5=IN3 PC6=IN4  (L9110s/ULN2003 driver board)
  *   POT       PC4  -> AIN2, 10k potentiometer wiper -> motor speed
  *   LED_RUN   PA3  -> running indicator (active high)
  *   LED_DIR   PB3  -> reverse indicator (lit when CCW, active high)
@@ -19,6 +19,12 @@
  * Event loop: TIM1 hard interrupt schedules key.onTime / motor.onTime;
  * the main loop drains the UART TX ring buffer and samples the
  * potentiometer every 200ms to update motor speed.
+ *
+ * Motor power window: every step energizes the coils for on_ms and
+ * releases them (all four outputs 0) until the next step — coil
+ * current flows only inside the window. on_ms is passed to
+ * Motor_Create (4 ms empirical default, MOTOR_ON_MS in motor.h);
+ * keep it <= smallest period, or the motor runs always-on.
  *
  * Wiring note: the four coil outputs are ordinary push-pull GPIO pins.
  * For a 2-phase 4-wire motor use a L9110s/ULN2003 driver board
@@ -45,8 +51,8 @@
 #define KEY_PIN         3
 
 /* Stepper motor phase outputs (IN1..IN4) */
-static const uint16_t MOTOR_PORTS[4] = { GPIO_PB, GPIO_PB, GPIO_PC, GPIO_PC };
-static const uint8_t  MOTOR_PINS[4]  = { 4,       5,       5,       6       };
+static const uint16_t MOTOR_PORTS[4] = { GPIO_PC, GPIO_PC, GPIO_PC, GPIO_PC };
+static const uint8_t  MOTOR_PINS[4]  = { 3,       7,       5,       6       };
 
 /* Potentiometer ADC (PC4 = AIN2) */
 #define ADC_CH_POT      ADC_CH_PC4
@@ -56,7 +62,7 @@ static const uint8_t  MOTOR_PINS[4]  = { 4,       5,       5,       6       };
 #define LED_RUN_PIN     3
 
 /* Reverse indicator LED (PB3 — PB0..PB3 are free on this design;
- * PB4/PB5 are used by the motor, active high) */
+ * PB4/PB5 are freed (motor moved to PC3/PC7), active high) */
 #define LED_DIR_PORT    GPIO_PB
 #define LED_DIR_PIN     3
 
@@ -222,7 +228,7 @@ int main(void)
     uint16_t last_period   = 0xFFFF; /* force first speed report       */
 
     /* Create objects (bind methods + defaults) */
-    motor   = Motor_Create(MOTOR_PORTS, MOTOR_PINS);
+    motor   = Motor_Create(MOTOR_PORTS, MOTOR_PINS, MOTOR_ON_MS); /* 3ms 通电时间窗 */
     key     = KEY_Create(KEY_PORT, KEY_PIN);
     uart    = UART_Create(UART1_BASE);
     adc     = ADC_Create(ADC_CH_POT, 7);   /* PC4 电位器, SPSEL=/9, 长采样+平均滤波 */
@@ -233,7 +239,7 @@ int main(void)
     clock_setup();                  /* HSI 16MHz */
 
     /* Init peripherals */
-    motor.init(&motor);             /* PB4/PB5/PC5/PC6 push-pull, coils off */
+    motor.init(&motor);             /* PC3/PC7/PC5/PC6 push-pull, coils off */
     key.init(&key);                 /* PD3 input + pull-up + EXTI3 */
     uart.init(&uart);               /* UART1 115200 8N1, TX PD5 / RX PD6 */
     adc.init(&adc);                 /* ADC1 single conversion, AIN2 = PC4 */

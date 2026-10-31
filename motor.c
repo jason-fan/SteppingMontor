@@ -17,8 +17,11 @@
  * Forward (CW) walks the table upward, reverse (CCW) walks downward.
  * Stopping releases all coils (all outputs 0) to avoid coil heating.
  *
- * Timing: the phase is advanced once per period_ms, counted by the
- * 1ms time-slice tick passed into onTime() — fully non-blocking.
+ * Timing: at each step boundary (every period_ms) the next phase is
+ * written and the coils are energized for on_ms = MOTOR_ON_MS. When
+ * on_ms elapses before the next step, all four outputs go to 0 and
+ * the coils stay released until the next step boundary. Fully
+ * non-blocking, counted by the 1ms time-slice tick passed to onTime().
  */
 
 #include <stdint.h>
@@ -51,7 +54,7 @@ static const uint8_t phase_table[8] = {
 
 /* Write one phase pattern to the four coil pins.
  * Each pin is written with a read-modify-write on its own port, so
- * pins sharing a port (e.g. PB4/PB5 or PC5/PC6) are still safe. */
+ * pins sharing a port (e.g. PC3/PC5/PC6/PC7) are still safe. */
 static void motor_write_phase(Motor_t *self, uint8_t pattern)
 {
     uint8_t i;
@@ -102,11 +105,18 @@ static void motor_onTime(Motor_t *self, uint16_t tick)
     if (!self->running) {
         return;
     }
-    /* period_ms >= 1 guaranteed by setSpeed clamp; accumulate ticks
-     * and step when the period elapses. */
+    /* Step timeline (acc = ms elapsed inside current step):
+     *   acc=0           step boundary: advance phase + energize coils
+     *   acc=on_ms       power window over: release all coils (off)
+     *   acc=period_ms   next step: wrap to 0 and re-energize
+     * period_ms >= 1 guaranteed by setSpeed clamp; on_ms from MOTOR_ON_MS.
+     * If on_ms >= period_ms the off branch never fires: the motor is
+     * effectively always energized (continuous mode). */
     if (++self->acc >= self->period_ms) {
         self->acc = 0;
-        motor_step_once(self);
+        motor_step_once(self);            /* new phase, coils on */
+    } else if (self->on_ms < self->period_ms && self->acc == self->on_ms) {
+        motor_write_phase(self, 0);       /* power window over: coils off */
     }
 }
 
@@ -151,7 +161,7 @@ static uint8_t motor_is_running(Motor_t *self)
 
 /* ========== Constructor ========== */
 
-Motor_t Motor_Create(const uint16_t *ports, const uint8_t *pins)
+Motor_t Motor_Create(const uint16_t *ports, const uint8_t *pins, uint16_t on_ms)
 {
     Motor_t motor;
     uint8_t i;
@@ -164,6 +174,7 @@ Motor_t Motor_Create(const uint16_t *ports, const uint8_t *pins)
     motor.dir        = 0;
     motor.running    = 0;
     motor.period_ms  = 10;   /* default 10 ms per step */
+    motor.on_ms      = on_ms;         /* power-on window per step (from caller) */
     motor.step_index = 0;
     motor.acc        = 0;
 
