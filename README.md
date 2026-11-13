@@ -15,7 +15,7 @@ AIGC:
 
 # project2 - STM8S103F3P6 两相四线步进电机控制
 
-基于 STM8S103F3P6（TSSOP20）的两相四线步进电机控制工程。采用 SDCC 编译，全部驱动以「结构体 + 函数指针」的面向对象风格自研实现，不依赖官方库与第三方代码。支持单键启停/换向、电位器连续调速、双 LED 状态指示、硬件 BEEP 提示音与 UART 调试输出。
+基于 STM8S103F3P6（TSSOP20）的两相四线步进电机控制工程。采用 SDCC 编译，全部驱动以「结构体 + 函数指针」的面向对象风格自研实现，不依赖官方库与第三方代码。支持单键双模式控制（连续转 / 点动）、双击换向、电位器连续调速、双 LED 状态指示、硬件 BEEP 提示音与 UART 调试输出。
 
 ## 硬件接线（引脚分配，TSSOP20）
 
@@ -27,7 +27,7 @@ AIGC:
 | 电机 IN3 | PC5 | 接 L9110s/ULN2003 驱动板 IN3（推挽输出） |
 | 电机 IN4 | PC6 | 接 L9110s/ULN2003 驱动板 IN4（推挽输出） |
 | 电位器 | PC4（AIN2） | 10k 电位器中心抽头，两端接 3.3V / GND，ADC 单次转换 |
-| 启停指示灯 | PA3 | 高电平点亮；电机运行时亮，停止时灭；**上电默认熄灭** |
+| 启停指示灯 | PA3 | 高电平点亮；连续转运行时亮、停止时灭，点动每走一步短闪 30ms；**上电默认熄灭** |
 | 反转指示灯 | PB3 | 高电平点亮；反转（CCW）时亮，正转（CW）时灭；**上电默认熄灭** |
 | 蜂鸣器 | PD4 | STM8S 硬件 BEEP 外设输出（pin1），可选 1/2/4 kHz |
 | UART TX | PD5 | 115200 8N1 调试输出（printf） |
@@ -39,9 +39,13 @@ AIGC:
 
 ### 按键（PD3，非阻塞 FSM）
 
-- **单击**：电机 启动 ↔ 停止 切换。启动：PA3 亮、BEEP 2kHz/100ms、串口 `MOTOR START`；停止：PA3 灭、BEEP 1kHz/100ms、串口 `MOTOR STOP`
-- **双击**：强制停止电机（PA3 灭、串口 `MOTOR STOP`、BEEP 1kHz/100ms）
-- **长按**：正转（CW）↔ 反转（CCW）切换。PB3 反转灯 CCW 亮 / CW 灭，BEEP 4kHz/80ms，串口 `DIR CCW` / `DIR CW`
+按键行为按**运行模式**区分，上电默认「连续转」，长按切换模式：
+
+- **单击**
+  - **连续转模式下**：电机 启动 ↔ 停止 切换。启动：PA3 亮、BEEP 2kHz/100ms、串口 `MOTOR START`；停止：PA3 灭、BEEP 1kHz/100ms、串口 `MOTOR STOP`
+  - **点动模式下**：走一步（按当前方向前进一个半步，相位立即通电 `on_ms` 后自动断电），PA3 短闪 30ms、BEEP 1kHz/30ms、串口 `JOG STEP`
+- **双击**：正转（CW）↔ 反转（CCW）切换。PB3 反转灯 CCW 亮 / CW 灭，BEEP 4kHz/80ms，串口 `DIR CCW` / `DIR CW`
+- **长按**：连续转 ↔ 点动 模式切换。切换时**先停机并熄灭 PA3**，避免连续运转状态串入点动模式；BEEP 4kHz/120ms 进入点动、2kHz/120ms 回到连续转；串口 `MODE JOG` / `MODE CONTINUOUS`
 
 ### 电位器调速（PC4 = AIN2）
 
@@ -58,6 +62,7 @@ AIGC:
 - **每步通电时间窗**：每步开始时输出目标相序并通电 `on_ms`（经验值 **4ms**）毫秒；on_ms 时间到且尚未到下一步时，四路输出全部清零（L9110S 输入全 0，线圈断电），到 `period_ms` 时刻执行下一步换相并重新通电——慢速下线圈只在通电窗口内有电流，**省电流、电机不发烫**
 - `on_ms` 由 `Motor_Create(ports, pins, on_ms)` 传入（`motor.h` 中 `MOTOR_ON_MS` 为推荐经验值 4U）；取值应 ≤ 最小 period（本项目调速下限 2ms/步）；若 on_ms ≥ 当前 period，断电分支不触发，等效**常通电**（旧行为）
 - 停止时释放全部线圈（输出低电平），避免长时间通电发热
+- **单步点动 `stepOnce()`**：按当前方向换相一个半步并通电，`running` 保持 0；`motor.onTime()` 在 `on_ms` 到期后自动断电（`jog_active` 标志 + `jog_acc` 计数），进入连续转（`start`）或停止（`stop`）时该标志被清除
 
 ### L9110S 驱动板接线线序
 
@@ -75,7 +80,7 @@ AIGC:
 
 - 115200 8N1；发送走 128 字节非阻塞环形缓冲，由主循环 `uart.tx_service()` 排空（按键回调运行在 TIM1 中断内，仅入队不阻塞）
 - RXNE 中断接收，主循环回显收到的字节
-- 打印内容：上电 `STM8S103 STEPPER ready`；按键事件 `MOTOR START/STOP`、`DIR CW/CCW`；调速 `pot=... spd=... ms/step`
+- 打印内容：上电 `STM8S103 STEPPER ready`；按键事件 `MOTOR START/STOP`（连续转）、`JOG STEP`（点动一步）、`DIR CW/CCW`、`MODE JOG/CONTINUOUS`；调速 `pot=... spd=... ms/step`
 
 ### 运行机制
 
@@ -104,7 +109,7 @@ D:\sdcc\bin\stm8flash.exe -c stlinkv2 -p stm8s103f3 -w project2.ihx
 | 文件 | 说明 |
 |---|---|
 | main.c | 应用编排 + 时钟/TIM1/EXTI/UART1_RX 中断向量表（含 main 单元向量表） |
-| motor.h / motor.c | 步进电机对象：1-2 相半步换相、启停、正反转、调速钳制 |
+| motor.h / motor.c | 步进电机对象：1-2 相半步换相、启停、单步点动（stepOnce）、正反转、调速钳制 |
 | key.h / key.c | 按键对象：任意端口 EXTI 参数化注册，非阻塞单击/双击/长按 FSM |
 | adc.h / adc.c | ADC1 对象：PC4(AIN2) 单次转换 + 平均滤波 + EOC 超时 |
 | uart.h / uart.c | UART1 对象：115200 8N1，非阻塞 TX 环形缓冲 + RX 中断 |

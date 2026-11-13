@@ -103,6 +103,15 @@ static void motor_onTime(Motor_t *self, uint16_t tick)
 {
     (void)tick;
     if (!self->running) {
+        /* Jog one-step: the coils were energized by stepOnce(); release
+         * them once the on_ms power window elapses. running stays 0, so
+         * the continuous step chain is never engaged. */
+        if (self->jog_active) {
+            if (++self->jog_acc >= self->on_ms) {
+                self->jog_active = 0;
+                motor_write_phase(self, 0);   /* power window over: coils off */
+            }
+        }
         return;
     }
     /* Step timeline (acc = ms elapsed inside current step):
@@ -124,6 +133,7 @@ static void motor_start(Motor_t *self)
 {
     self->acc     = 0;
     self->running = 1;
+    self->jog_active = 0;   /* cancel any pending jog power window */
     /* Refresh the current phase on the pins (in case we were stopped
      * with coils released). */
     motor_write_phase(self, phase_table[self->step_index]);
@@ -132,7 +142,18 @@ static void motor_start(Motor_t *self)
 static void motor_stop(Motor_t *self)
 {
     self->running = 0;
+    self->jog_active = 0;
     motor_write_phase(self, 0);   /* release all coils */
+}
+
+/* Jog: advance exactly one step in the current direction and energize
+ * the coils; motor_onTime() releases them after on_ms. Non-blocking, so
+ * it is safe to call straight from the key FSM (TIM1 ISR context). */
+static void motor_step_jog(Motor_t *self)
+{
+    motor_step_once(self);        /* next phase by dir, coils on */
+    self->jog_active = 1;
+    self->jog_acc    = 0;
 }
 
 static void motor_toggle_dir(Motor_t *self)
@@ -177,12 +198,15 @@ Motor_t Motor_Create(const uint16_t *ports, const uint8_t *pins, uint16_t on_ms)
     motor.on_ms      = on_ms;         /* power-on window per step (from caller) */
     motor.step_index = 0;
     motor.acc        = 0;
+    motor.jog_active = 0;
+    motor.jog_acc    = 0;
 
     /* Bind methods */
     motor.init      = motor_init;
     motor.onTime    = motor_onTime;
     motor.start     = motor_start;
     motor.stop      = motor_stop;
+    motor.stepOnce  = motor_step_jog;
     motor.toggleDir = motor_toggle_dir;
     motor.setDir    = motor_set_dir;
     motor.setSpeed  = motor_set_speed;

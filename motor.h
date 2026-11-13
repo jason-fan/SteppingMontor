@@ -25,6 +25,7 @@
  *   motor.init(&motor);
  *   motor.setSpeed(&motor, 10);   // 10 ms per step
  *   motor.start(&motor);
+ *   motor.stepOnce(&motor);       // jog: exactly one step, coils auto-off
  *   motor.onTime(&motor, g_tick); // from TIM1 ISR every 1ms
  */
 
@@ -65,12 +66,15 @@ struct Motor {
     uint8_t  step_index;    /* current phase index 0..7 (half-step) */
     uint16_t acc;           /* tick accumulator inside current step */
     uint16_t on_ms;         /* coil-on window per step (MOTOR_ON_MS) */
+    uint8_t  jog_active;    /* 1 = jog step energized, awaiting auto-off */
+    uint16_t jog_acc;       /* ms elapsed inside the jog power window */
 
     /* --- Public methods --- */
     void    (*init)     (Motor_t *self);      /* GPIO push-pull outputs, coils off */
     void    (*onTime)   (Motor_t *self, uint16_t tick); /* 1ms periodic event */
     void    (*start)    (Motor_t *self);      /* begin stepping */
     void    (*stop)     (Motor_t *self);      /* stop, release all coils */
+    void    (*stepOnce) (Motor_t *self);      /* jog: one step, coils auto-off after on_ms */
     void    (*toggleDir)(Motor_t *self);      /* flip rotation direction */
     void    (*setDir)   (Motor_t *self, uint8_t dir);
     void    (*setSpeed) (Motor_t *self, uint16_t period_ms);

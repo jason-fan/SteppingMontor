@@ -7,8 +7,10 @@
  *
  * Peripherals / pins (TSSOP20):
  *   KEY       PD3  -> single button (active low, pull-up, TSSOP20 pin2)
- *                    click    : toggle motor RUN / STOP
- *                    long-press: toggle CW / CCW
+ *                    click       : CONTINUOUS mode -> motor RUN / STOP toggle
+ *                                  JOG mode        -> advance one single step
+ *                    double-click: toggle CW / CCW rotation direction
+ *                    long-press  : toggle CONTINUOUS / JOG operation mode
  *   MOTOR     PC3=IN1 PC7=IN2 PC5=IN3 PC6=IN4  (L9110s/ULN2003 driver board)
  *   POT       PC4  -> AIN2, 10k potentiometer wiper -> motor speed
  *   LED_RUN   PA3  -> running indicator (active high)
@@ -90,6 +92,21 @@ static Beep_t  beep;                   /* BEEP object (PD4)           */
 /* Global 1ms tick, incremented by TIM1 ISR */
 volatile uint16_t g_tick = 0;
 
+/* ========== Operation Mode (toggled by long-press) ==========
+ * MODE_CONTINUOUS: click = start/stop continuous stepping
+ * MODE_JOG       : click = advance exactly one step               */
+#define MODE_CONTINUOUS   0U
+#define MODE_JOG          1U
+
+static uint8_t jog_mode = MODE_CONTINUOUS;
+
+/* Jog step feedback: light PA3 on each jog step and clear it from the
+ * main loop after JOG_LED_MS (the key callback runs inside the TIM1
+ * ISR, so it must not block or busy-wait). */
+#define JOG_LED_MS        30U
+static volatile uint8_t  jog_led_on   = 0;
+static volatile uint16_t jog_led_tick = 0;
+
 /* ========== Speed Mapping (potentiometer -> ms per step) ==========
  * ADC 0..1023 maps linearly to MOTOR_PERIOD_MAX..MOTOR_PERIOD_MIN:
  *   pot full CCW (0)   -> 50 ms/step (slowest)
@@ -113,10 +130,23 @@ static uint16_t adc_to_period(uint16_t adc_raw)
  * callbacks are safe to run inside the TIM1 ISR; the main loop
  * drains the buffer with uart.tx_service(). */
 
-/* Click: toggle motor RUN / STOP */
+/* Click:
+ *   CONTINUOUS mode -> toggle motor RUN / STOP
+ *   JOG mode        -> advance exactly one step (coils auto-release)  */
 static void key_onclick(KEY_t *self)
 {
     (void)self;
+
+    if (jog_mode == MODE_JOG) {
+        motor.stepOnce(&motor);        /* one step in current direction */
+        led_run.on(&led_run);          /* short PA3 pulse, cleared by main loop */
+        jog_led_tick = g_tick;
+        jog_led_on   = 1;
+        beep.once(&beep, 1, 30);       /* jog tone: 1kHz / 30ms */
+        uart.puts(&uart, "JOG STEP\r\n");
+        return;
+    }
+
     if (motor.isRunning(&motor)) {
         motor.stop(&motor);
         led_run.off(&led_run);
@@ -130,21 +160,8 @@ static void key_onclick(KEY_t *self)
     }
 }
 
-/* Click: toggle motor STOP */
+/* Double-click: toggle rotation direction CW <-> CCW, update reverse LED */
 static void key_ondbclick(KEY_t *self)
-{
-    (void)self;
-    if (motor.isRunning(&motor)) {
-        motor.stop(&motor);
-        led_run.off(&led_run);
-        uart.puts(&uart, "MOTOR STOP\r\n");
-    }
-    beep.once(&beep, 1, 100);      /* stop  tone: 1kHz / 100ms */
-}
-
-
-/* Long-press: toggle rotation direction, update reverse LED */
-static void key_onlongpress(KEY_t *self)
 {
     (void)self;
     motor.toggleDir(&motor);
@@ -156,6 +173,31 @@ static void key_onlongpress(KEY_t *self)
     beep.once(&beep, 4, 80);        /* direction tone: 4kHz / 80ms */
     uart.printf(&uart, "DIR %s\r\n",
                 motor.dir ? "CCW" : "CW");
+}
+
+
+/* Long-press: toggle CONTINUOUS <-> JOG operation mode.
+ * The motor is always stopped on a mode change, so a running continuous
+ * motion never leaks into jog mode (and vice versa). */
+static void key_onlongpress(KEY_t *self)
+{
+    (void)self;
+
+    if (motor.isRunning(&motor)) {
+        motor.stop(&motor);
+    }
+    led_run.off(&led_run);
+    jog_led_on = 0;
+
+    jog_mode = (uint8_t)(jog_mode ^ 1U);
+
+    if (jog_mode == MODE_JOG) {
+        beep.once(&beep, 4, 120);      /* mode tone: 4kHz / 120ms */
+        uart.puts(&uart, "MODE JOG\r\n");
+    } else {
+        beep.once(&beep, 2, 120);      /* mode tone: 2kHz / 120ms */
+        uart.puts(&uart, "MODE CONTINUOUS\r\n");
+    }
 }
 
 /* ========== TIM1 1ms Time-Slice Timer (STM8S103) ========== */
@@ -247,8 +289,9 @@ int main(void)
     led_dir.init(&led_dir);         /* PB3 push-pull output */
     beep.init(&beep);               /* LSI on + PD4 BEEP push-pull (was missing!) */
 
-    /* Bind key callbacks: click = start/stop toggle,
-     *                    long-press = direction toggle */
+    /* Bind key callbacks: click       = RUN/STOP (continuous) or one step (jog),
+     *                     double-click = direction toggle CW <-> CCW,
+     *                     long-press   = CONTINUOUS <-> JOG mode toggle */
     key.onclick     = &key_onclick;
     key.ondblclick = &key_ondbclick;
     key.onlongpress = &key_onlongpress;
@@ -278,6 +321,12 @@ int main(void)
     while (1) {
         /* Drain pending TX bytes */
         uart.tx_service(&uart);
+
+        /* Jog step feedback: clear the PA3 pulse after JOG_LED_MS */
+        if (jog_led_on && (uint16_t)(g_tick - jog_led_tick) >= JOG_LED_MS) {
+            jog_led_on = 0;
+            led_run.off(&led_run);
+        }
 
         /* UART RX echo */
         if (uart.rx_flag) {
