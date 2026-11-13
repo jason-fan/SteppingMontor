@@ -13,7 +13,9 @@
  *                    long-press  : toggle CONTINUOUS / JOG operation mode
  *   MOTOR     PC3=IN1 PC7=IN2 PC5=IN3 PC6=IN4  (L9110s/ULN2003 driver board)
  *   POT       PC4  -> AIN2, 10k potentiometer wiper -> motor speed
- *   LED_RUN   PA3  -> running indicator (active high)
+ *   LED_RUN   PA3  -> mode/run indicator (active high):
+ *                    CONTINUOUS: lit while stepping, dark when stopped
+ *                    JOG       : blinks every JOG_BLINK_MS (mode marker)
  *   LED_DIR   PB3  -> reverse indicator (lit when CCW, active high)
  *   BEEP      PD4  -> hardware BEEP (key tone)
  *   UART      PD5 TX / PD6 RX, 115200 8N1 debug output
@@ -100,12 +102,15 @@ volatile uint16_t g_tick = 0;
 
 static uint8_t jog_mode = MODE_CONTINUOUS;
 
-/* Jog step feedback: light PA3 on each jog step and clear it from the
- * main loop after JOG_LED_MS (the key callback runs inside the TIM1
- * ISR, so it must not block or busy-wait). */
-#define JOG_LED_MS        30U
-static volatile uint8_t  jog_led_on   = 0;
-static volatile uint16_t jog_led_tick = 0;
+/* JOG mode indication: PA3 blinks with a JOG_BLINK_MS half period so the
+ * current mode is visible at a glance, and it is NOT touched by clicks
+ * (a jog click only steps the motor). The blink is toggled from the main
+ * loop off g_tick — the key callbacks run inside the TIM1 ISR and must
+ * never block or busy-wait. In CONTINUOUS mode PA3 is a plain run lamp:
+ * lit while stepping, dark when stopped. */
+#define JOG_BLINK_MS      250U
+static volatile uint8_t  jog_blink_on   = 0;
+static volatile uint16_t jog_blink_tick = 0;
 
 /* ========== Speed Mapping (potentiometer -> ms per step) ==========
  * ADC 0..1023 maps linearly to MOTOR_PERIOD_MAX..MOTOR_PERIOD_MIN:
@@ -131,17 +136,15 @@ static uint16_t adc_to_period(uint16_t adc_raw)
  * drains the buffer with uart.tx_service(). */
 
 /* Click:
- *   CONTINUOUS mode -> toggle motor RUN / STOP
- *   JOG mode        -> advance exactly one step (coils auto-release)  */
+ *   CONTINUOUS mode -> toggle motor RUN / STOP (PA3 follows the motor)
+ *   JOG mode        -> advance exactly one step; PA3 keeps its mode blink
+ *                      pattern and is deliberately left untouched here   */
 static void key_onclick(KEY_t *self)
 {
     (void)self;
 
     if (jog_mode == MODE_JOG) {
         motor.stepOnce(&motor);        /* one step in current direction */
-        led_run.on(&led_run);          /* short PA3 pulse, cleared by main loop */
-        jog_led_tick = g_tick;
-        jog_led_on   = 1;
         beep.once(&beep, 1, 30);       /* jog tone: 1kHz / 30ms */
         uart.puts(&uart, "JOG STEP\r\n");
         return;
@@ -177,8 +180,9 @@ static void key_ondbclick(KEY_t *self)
 
 
 /* Long-press: toggle CONTINUOUS <-> JOG operation mode.
- * The motor is always stopped on a mode change, so a running continuous
- * motion never leaks into jog mode (and vice versa). */
+ * The motor is stopped immediately on any mode change (coils released,
+ * PA3 dark), so a running continuous motion never leaks into jog mode.
+ * In JOG mode PA3 switches to a blink pattern as the mode indicator. */
 static void key_onlongpress(KEY_t *self)
 {
     (void)self;
@@ -186,15 +190,19 @@ static void key_onlongpress(KEY_t *self)
     if (motor.isRunning(&motor)) {
         motor.stop(&motor);
     }
-    led_run.off(&led_run);
-    jog_led_on = 0;
+    led_run.off(&led_run);         /* both modes start from PA3 dark */
 
     jog_mode = (uint8_t)(jog_mode ^ 1U);
 
     if (jog_mode == MODE_JOG) {
+        /* Arm the mode blink: lit immediately, then toggled by main loop */
+        jog_blink_on   = 1;
+        jog_blink_tick = g_tick;
+        led_run.on(&led_run);
         beep.once(&beep, 4, 120);      /* mode tone: 4kHz / 120ms */
         uart.puts(&uart, "MODE JOG\r\n");
     } else {
+        jog_blink_on = 0;              /* back to a plain run lamp */
         beep.once(&beep, 2, 120);      /* mode tone: 2kHz / 120ms */
         uart.puts(&uart, "MODE CONTINUOUS\r\n");
     }
@@ -322,10 +330,18 @@ int main(void)
         /* Drain pending TX bytes */
         uart.tx_service(&uart);
 
-        /* Jog step feedback: clear the PA3 pulse after JOG_LED_MS */
-        if (jog_led_on && (uint16_t)(g_tick - jog_led_tick) >= JOG_LED_MS) {
-            jog_led_on = 0;
-            led_run.off(&led_run);
+        /* JOG mode indicator: toggle PA3 every JOG_BLINK_MS.
+         * CONTINUOUS mode leaves PA3 entirely under the key handlers
+         * (lit while running, dark when stopped). */
+        if (jog_mode == MODE_JOG
+            && (uint16_t)(g_tick - jog_blink_tick) >= JOG_BLINK_MS) {
+            jog_blink_tick = g_tick;
+            jog_blink_on   = (uint8_t)(jog_blink_on ^ 1U);
+            if (jog_blink_on) {
+                led_run.on(&led_run);
+            } else {
+                led_run.off(&led_run);
+            }
         }
 
         /* UART RX echo */
