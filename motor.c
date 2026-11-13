@@ -3,7 +3,7 @@
  *
  * Commutation table: 1-2 phase excitation (half-step), 8 phases.
  * Coil wiring: IN1 -> A phase, IN2 -> B phase, IN3 -> /A, IN4 -> /B.
- *
+ *         A+  B+  A-  B-
  *   idx  IN1 IN2 IN3 IN4   active coils
  *   0     1   0   0   0    A
  *   1     1   1   0   0    A + B
@@ -16,6 +16,17 @@
  *
  * Forward (CW) walks the table upward, reverse (CCW) walks downward.
  * Stopping releases all coils (all outputs 0) to avoid coil heating.
+ *
+ * BIT-ORDER NOTE (mirror, verified on hardware): the table above is
+ * written with bit3 = IN1 .. bit0 = IN4, while motor_write_phase()
+ * writes pattern bit i to pin[i], i.e. bit0 = IN1 .. bit3 = IN4.
+ * The two bit orders are mirrored, therefore the physical excitation
+ * sequence is the REVERSE of the rows listed above, and dir = 0
+ * (nominal CW) turns the motor in the opposite direction to the
+ * labels here. This is expected behaviour, not a wiring bug — swap
+ * the two wires of one winding (A-OA/A-OB or B-OA/B-OB) to invert.
+ * Pin mapping used by main.c: IN1=PC3(A+), IN2=PC7(B+),
+ * IN3=PC5(A-), IN4=PC6(B-); winding A = IN1+IN3, winding B = IN2+IN4.
  *
  * Timing: at each step boundary (every period_ms) the next phase is
  * written and the coils are energized for on_ms = MOTOR_ON_MS. When

@@ -6,17 +6,22 @@
  * Clock:        HSI 16MHz
  *
  * Peripherals / pins (TSSOP20):
- *   KEY       PD3  -> single button (active low, pull-up, TSSOP20 pin2)
+ *   KEY       PD3  -> single button (active low, pull-up, TSSOP20 pin20)
  *                    click       : CONTINUOUS mode -> motor RUN / STOP toggle
  *                                  JOG mode        -> advance one single step
  *                    double-click: toggle CW / CCW rotation direction
  *                    long-press  : toggle CONTINUOUS / JOG operation mode
- *   MOTOR     PC3=IN1 PC7=IN2 PC5=IN3 PC6=IN4  (L9110s/ULN2003 driver board)
+ *   MOTOR     PC3=IN1(A-1A) PC7=IN2(B-1B) PC5=IN3(A-1B) PC6=IN4(B-1A)
+ *             (L9110s/ULN2003 driver board; names in brackets are the
+ *              L9110S silkscreen labels, A phase = PC3+PC5 (IN1+IN3),
+ *              B phase = PC6+PC7 (IN4+IN2))
  *   POT       PC4  -> AIN2, 10k potentiometer wiper -> motor speed
  *   LED_RUN   PA3  -> mode/run indicator (active high):
  *                    CONTINUOUS: lit while stepping, dark when stopped
  *                    JOG       : blinks every JOG_BLINK_MS (mode marker)
- *   LED_DIR   PB3  -> reverse indicator (lit when CCW, active high)
+ *   LED_DIR   PB4  -> reverse indicator (lit when CCW, ACTIVE LOW:
+ *                    PB4 (pin12) is a TRUE OPEN-DRAIN pad, it cannot
+ *                    drive high -> LED anode to VDD, cathode to PB4)
  *   BEEP      PD4  -> hardware BEEP (key tone)
  *   UART      PD5 TX / PD6 RX, 115200 8N1 debug output
  *
@@ -27,7 +32,7 @@
  * Motor power window: every step energizes the coils for on_ms and
  * releases them (all four outputs 0) until the next step — coil
  * current flows only inside the window. on_ms is passed to
- * Motor_Create (4 ms empirical default, MOTOR_ON_MS in motor.h);
+ *     Motor_Create(MOTOR_PORTS, MOTOR_PINS, MOTOR_ON_MS);  4 ms window
  * keep it <= smallest period, or the motor runs always-on.
  *
  * Wiring note: the four coil outputs are ordinary push-pull GPIO pins.
@@ -54,7 +59,13 @@
 #define KEY_PORT        GPIO_PD
 #define KEY_PIN         3
 
-/* Stepper motor phase outputs (IN1..IN4) */
+/* Stepper motor phase outputs (IN1..IN4)
+ * MOTOR_PINS[i] is the pin of IN(i+1):
+ *   IN1 = PC3 (A+ / L9110S A-1A), IN2 = PC7 (B+ / L9110S B-1B),
+ *   IN3 = PC5 (A- / L9110S A-1B), IN4 = PC6 (B- / L9110S B-1A)
+ * Winding A = IN1+IN3 = PC3+PC5, winding B = IN2+IN4 = PC7+PC6.
+ * Wire by the L9110S silkscreen (A-1A/A-1B one channel, B-1A/B-1B the
+ * other); the IN numbers are code references only, not wiring labels. */
 static const uint16_t MOTOR_PORTS[4] = { GPIO_PC, GPIO_PC, GPIO_PC, GPIO_PC };
 static const uint8_t  MOTOR_PINS[4]  = { 3,       7,       5,       6       };
 
@@ -65,10 +76,10 @@ static const uint8_t  MOTOR_PINS[4]  = { 3,       7,       5,       6       };
 #define LED_RUN_PORT    GPIO_PA
 #define LED_RUN_PIN     3
 
-/* Reverse indicator LED (PB3 — PB0..PB3 are free on this design;
- * PB4/PB5 are freed (motor moved to PC3/PC7), active high) */
+/* Reverse indicator LED (PB4 = TSSOP20 pin12, I2C_SCL, unused here;
+ * TRUE OPEN-DRAIN pad -> ACTIVE LOW; PB3 does NOT exist on TSSOP20) */
 #define LED_DIR_PORT    GPIO_PB
-#define LED_DIR_PIN     3
+#define LED_DIR_PIN     4
 
 /* ========== STM8S103 Register Definitions ========== */
 
@@ -115,11 +126,14 @@ static volatile uint16_t jog_blink_tick = 0;
 /* ========== Speed Mapping (potentiometer -> ms per step) ==========
  * ADC 0..1023 maps linearly to MOTOR_PERIOD_MAX..MOTOR_PERIOD_MIN:
  *   pot full CCW (0)   -> 50 ms/step (slowest)
- *   pot full CW (1023) -> 2  ms/step (fastest)
- * MIN=2U guards against 1ms/step stalling (L9110s/ULN2003 small-motor limit).
- * Values are clamped by motor.setSpeed anyway. */
+ *   pot full CW (1023) -> 6  ms/step (fastest)
+ * MIN=6U: 6 ms/step is the fastest step used on the small 5V 2-phase
+ * motor. It stays above on_ms (4 ms), so every speed keeps a coil
+ * off-window (4 ms on / 2 ms off at the fastest step) — no continuous
+ * energization at any pot position. Values are clamped by
+ * motor.setSpeed anyway. */
 #define MOTOR_PERIOD_MAX   50U
-#define MOTOR_PERIOD_MIN   2U
+#define MOTOR_PERIOD_MIN   6U
 
 static uint16_t adc_to_period(uint16_t adc_raw)
 {
@@ -225,8 +239,8 @@ static void tim1_setup(void)
     CLK_PCKENR1 |= 0x80;   /* bit7 = TIM1 clock gate, explicit enable */
     TIM1_PSCRH = 0x00;   /* prescaler high byte (16-bit prescaler = 16) */
     TIM1_PSCRL = 15;     /* /16 */
-    TIM1_ARRH  = 0x03;   /* auto-reload 1000 (0x03E8) */
-    TIM1_ARRL  = 0xE8;
+    TIM1_ARRH  = 0x03;   /* auto-reload 999 (0x03E7) = exactly 1 ms */
+    TIM1_ARRL  = 0xE7;
     TIM1_EGR  |= 0x01;   /* UG: generate update to load prescaler/ARR */
     TIM1_IER  |= 0x01;   /* UIE: enable update interrupt */
     TIM1_CR1  |= 0x01;   /* CEN: start counter */
@@ -278,12 +292,12 @@ int main(void)
     uint16_t last_period   = 0xFFFF; /* force first speed report       */
 
     /* Create objects (bind methods + defaults) */
-    motor   = Motor_Create(MOTOR_PORTS, MOTOR_PINS, MOTOR_ON_MS); /* 3ms 通电时间窗 */
+    motor   = Motor_Create(MOTOR_PORTS, MOTOR_PINS, MOTOR_ON_MS); /* 4ms 通电时间窗 */
     key     = KEY_Create(KEY_PORT, KEY_PIN);
     uart    = UART_Create(UART1_BASE);
-    adc     = ADC_Create(ADC_CH_POT, 7);   /* PC4 电位器, SPSEL=/9, 长采样+平均滤波 */
+    adc     = ADC_Create(ADC_CH_POT, 7);   /* PC4 电位器, SPSEL=111 -> fADC=fMASTER/18 */
     led_run = LED_Create(LED_RUN_PORT, LED_RUN_PIN, 1); /* active high */
-    led_dir = LED_Create(LED_DIR_PORT, LED_DIR_PIN, 1); /* active high */
+    led_dir = LED_Create(LED_DIR_PORT, LED_DIR_PIN, 0); /* active LOW: PB4 open-drain */
     beep    = BEEP_Create();                /* 硬件 BEEP: PD4 */
 
     clock_setup();                  /* HSI 16MHz */
@@ -294,7 +308,7 @@ int main(void)
     uart.init(&uart);               /* UART1 115200 8N1, TX PD5 / RX PD6 */
     adc.init(&adc);                 /* ADC1 single conversion, AIN2 = PC4 */
     led_run.init(&led_run);         /* PA3 push-pull output */
-    led_dir.init(&led_dir);         /* PB3 push-pull output */
+    led_dir.init(&led_dir);         /* PB4 open-drain output (low = lit) */
     beep.init(&beep);               /* LSI on + PD4 BEEP push-pull (was missing!) */
 
     /* Bind key callbacks: click       = RUN/STOP (continuous) or one step (jog),

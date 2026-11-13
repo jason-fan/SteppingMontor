@@ -12,12 +12,14 @@
  * so no blocking delay is ever used.
  *
  * Power window: each step energizes the target phase pattern for
- * on_ms milliseconds (passed to Motor_Create, 4 ms empirical default),
+ * on_ms milliseconds (passed to Motor_Create, 4 ms default here),
  * then releases all four coils (L9110S inputs all 0) until the next
  * step boundary — coil current flows only inside the window, saving
- * power / reducing heat at slow speed. If on_ms >= period_ms the off
- * branch never fires and the motor is effectively always energized
- * (continuous mode).
+ * power / reducing heat at slow speed. main.c uses on_ms = 4 ms with
+ * a minimum period of 6 ms, so an off-window exists at every speed
+ * (4 ms on / 2 ms off at the fastest step). If on_ms >= period_ms the
+ * off branch never fires and the motor is effectively always
+ * energized (continuous mode).
  *
  * Usage:
  *   #include "motor.h"
@@ -37,17 +39,18 @@
 /* ========== Coil Power Window ==========
  * on_ms (Motor_Create parameter): milliseconds of coil energization
  * per step, before the outputs go to 0 and the coils stay released
- * until the next step. MOTOR_ON_MS below is the recommended default
- * (empirical 3 ms) for main.c — pass 4U to Motor_Create, or tune it.
+ * until the next step. MOTOR_ON_MS below is the default (4 ms) for
+ * main.c — pass MOTOR_ON_MS, or tune it.
  *
  * Valid range: 1..period_ms.
- *   - Keep it <= the smallest period used (MOTOR_PERIOD_MIN = 2 ms in
+ *   - Keep it <= the smallest period used (MOTOR_PERIOD_MIN = 6 ms in
  *     main.c) to guarantee an off-window at every speed.
  *   - If on_ms >= period_ms the motor is effectively always
  *     energized (continuous mode, no off window at that speed).
- * Empirical default 3 ms: at 2ms/step it is always-on; at >=4ms/step
- * it pulses 4ms on / rest off (low-speed coils stay cool, less current). */
-#define MOTOR_ON_MS  3U
+ * 4 ms: at the 6 ms fastest step it pulses 4 ms on / 2 ms off, and the
+ * off-window grows with slower steps (e.g. 4 ms on / 46 ms off at
+ * 50 ms/step), so the coils are never held on continuously. */
+#define MOTOR_ON_MS  4U
 
 /* ========== Motor Class Definition ========== */
 
