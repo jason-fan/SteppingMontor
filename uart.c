@@ -27,16 +27,19 @@ static void uart_init(UART_t *self)
 {
     (void)self;                 /* single UART1 instance on STM8S103 */
 
-    /* Force full-speed HSI: chip may power up with HSI divided down
-     * (effective fck ~2MHz), so a 9600-config BRR actually transmits
-     * at 1200 baud. Setting CLK_CKDIVR = 0x00 restores HSI/1 = 16MHz
-     * for both CPU and UART. */
-    CLK_CKDIVR = 0x00;
+    /* System clock (HSI 16MHz, CLK_CKDIVR = 0x00) is configured ONCE by the
+     * caller in main.c clock_setup(), which runs before uart.init().
+     * uart_init() deliberately does NOT touch CLK_CKDIVR: re-writing the
+     * master clock prescaler here would silently override whatever the
+     * clock owner had set, and the BRR values below assume fck = 16MHz. */
 
-    /* Enable all peripheral clocks (same as ST official library init:
-     * CLK_PCKENR1 = 0xFF). Must happen BEFORE touching UART registers,
-     * otherwise writes are ignored. */
-    CLK_PCKENR1 = 0xFF;
+    /* Enable the UART1 peripheral clock gate only (PCKENR1 bit2).
+     * READ-MODIFY-WRITE: PCKENR1 is shared with I2C1, SPI1, TIM2 and TIM3,
+     * so an unconditional "CLK_PCKENR1 = 0xFF" would switch on every
+     * peripheral clock and overwrite gates other modules configured.
+     * Must happen BEFORE touching UART registers, otherwise writes are
+     * ignored. */
+    CLK_PCKENR1 |= CLK_PCKENR1_UART1EN;
 
     /* PD5 = UART1_TX, PD6 = UART1_RX: PD5 push-pull output, PD6 floating
      * input (RX is peripheral-driven). STM8S requires DDR=1 for

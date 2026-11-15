@@ -25,6 +25,7 @@
 #define ADC_CR1_ADON            (uint8_t)0x01
 #define ADC_CR1_CONT            (uint8_t)0x02
 #define ADC_CR1_SPSEL           (uint8_t)0x70
+#define ADC_CR2_ALIGN           (uint8_t)0x08   /* bit3: 0 = left-aligned, 1 = right-aligned */
 
 /* ========== ADC1 Peripheral Clock Gate ==========
  * STM8S103: ADC1 clock is gated by CLK_PCKENR2 bit3 (ADC1EN, 0x08).
@@ -89,6 +90,14 @@ static void adc_init(ADC_t *self)
     /* CSR: select channel, preserve status bits (incl. EOC) */
     ADC1_CSR = (ADC1_CSR & (uint8_t)0xF0) | (self->ch & 0x0F);
 
+    /* CR2: force ALIGN = 0 (LEFT-aligned) explicitly instead of relying on
+     * the reset value. Left alignment puts DATA[9:2] in DRH[7:0] and
+     * DATA[1:0] in DRL[7:6], which is exactly what adc_convert_once()
+     * assumes when it merges the two bytes. Do NOT set ALIGN = 1 here:
+     * right alignment would move the low bits into DRL[1:0] and the
+     * merge formula below would return a value 4x too small. */
+    ADC1_CR2 &= (uint8_t)~ADC_CR2_ALIGN;
+
     /* CR1: set SPSEL (mask 0x70), clear CONT (single conversion) */
     ADC1_CR1 = (ADC1_CR1 & (uint8_t)~ADC_CR1_SPSEL)
              | ((self->spsel << 4) & ADC_CR1_SPSEL);
@@ -98,6 +107,10 @@ static void adc_init(ADC_t *self)
      * Without this the FIRST adc_read() only powers up on its ADON
      * write and the first EOC poll can time out (sentinel 0xFFFF). */
     ADC1_CR1 |= ADC_CR1_ADON;
+
+    /* No channel has been sampled yet -> the next adc_read() MUST run the
+     * settle delay once to charge the sample capacitor. */
+    self->last_ch = 0xFF;
 }
 
 /* ========== Single Conversion (internal) ==========
@@ -106,10 +119,11 @@ static void adc_init(ADC_t *self)
  * (ADC stays powered) between reads: clearing ADON first would power
  * the ADC down and back up on every sample, and the re-powered
  * conversion often never sets EOC -> timeout -> constant 0V readings.
- * Returns 0xFFFF sentinel if EOC never sets within the timeout. */
+ * Returns ADC_RAW_ERROR sentinel if EOC never sets within the timeout. */
 static uint16_t adc_convert_once(void)
 {
     uint16_t guard = 0;
+    uint8_t  drh, drl;
 
     /* Clear EOC before starting a new conversion */
     ADC1_CSR &= (uint8_t)~ADC_CSR_EOC;
@@ -119,19 +133,30 @@ static uint16_t adc_convert_once(void)
      * clock / channel can never hang the main loop. */
     while ((ADC1_CSR & ADC_CSR_EOC) == 0) {
         if (++guard >= ADC_EOC_TIMEOUT) {
-            return 0xFFFF;      /* timeout sentinel */
+            return ADC_RAW_ERROR;   /* EOC never set: propagate the fault */
         }
     }
-    /* Merge 10-bit result (right-aligned): DRH holds bits 9..2,
-     * DRL holds bits 1..0. Correct formula: (DRH << 2) | (DRL & 0x03). */
-    return (uint16_t)(((uint16_t)ADC1_DRH << 2) | (ADC1_DRL & 0x03U));
+    /* Merge 10-bit result. Alignment is LEFT (CR2 ALIGN = 0, forced in
+     * adc_init), so the data sits in the high bits of the 16-bit pair:
+     *   DRH[7:0] = DATA[9:2]
+     *   DRL[7:6] = DATA[1:0]   (DRL[5:0] unused)
+     * => result = (DRH << 2) | (DRL >> 6), range 0..1023.
+     * Read the bytes in TWO statements: the STM8S ADC latches DRL when DRH
+     * is read, so DRH must come first, and a single expression gives no
+     * evaluation-order guarantee for the two `|` operands. */
+    drh = ADC1_DRH;                 /* read first: latches DRL */
+    drl = ADC1_DRL;
+    return (uint16_t)(((uint16_t)drh << 2) | ((uint16_t)drl >> 6));
 }
 
 /* ========== Settling Delay ==========
- * STM8 ADC1 samples its input for a FIXED 1 ADC clock cycle — there is
+ * STM8 ADC1 samples its input for a FIXED 1 ADC clock cycle - there is
  * no programmable sampling time. Before starting a conversion we pause
  * briefly so the external input network (potentiometer wiper, wiring,
- * stray capacitance) has time to charge the ADC sample capacitor. */
+ * stray capacitance) has time to charge the ADC sample capacitor.
+ * NOTE: called from adc_read() ONLY when the channel changed (see
+ * last_ch) - charging is a one-off cost per channel selection, not a
+ * per-read cost. */
 static void adc_settle_delay(void)
 {
     volatile uint16_t i;
@@ -146,16 +171,31 @@ static uint16_t adc_read(ADC_t *self)
     uint16_t v;
     uint8_t  i, n = (self->samples < 1) ? 1 : self->samples;
 
-    /* Settle the input before sampling (see adc_settle_delay) */
-    adc_settle_delay();
+    /* Settle ONLY when the channel changed since the previous read.
+     * The 1 ADC clock sample window is fixed and very short, so the sample
+     * capacitor needs a pause to charge through the external input network
+     * - but ONLY after the channel is (re)selected. Repeating that 3000-nop
+     * delay on every read of the SAME channel buys nothing: no charge is
+     * lost between two conversions of one channel, the capacitor simply
+     * stays at the last sampled potential. */
+    if (self->ch != self->last_ch) {
+        adc_settle_delay();
+        self->last_ch = self->ch;
+    }
 
     /* Average n consecutive conversions; a single-shot reading on an
      * unstable input (pot wiper / wiring) jumps between quantization
      * levels, averaging restores a stable value close to true DC. */
     for (i = 0; i < n; i++) {
         v = adc_convert_once();
-        if (v == 0xFFFF) {
-            return 0x0000;      /* timeout sentinel -> report 0V */
+        if (v == ADC_RAW_ERROR) {
+            /* Do NOT fold the failure into 0x0000 (that reported "0 V", i.e.
+             * a pot turned fully CCW, and hid a dead ADC behind a plausible
+             * reading). Abort the whole read and hand the sentinel up: it is
+             * outside 0..1023, so no caller can confuse it with a real value,
+             * and the samples already accumulated are discarded instead of
+             * being averaged into a wrong result. */
+            return ADC_RAW_ERROR;
         }
         sum += v;
     }
@@ -183,6 +223,10 @@ ADC_t ADC_Create(uint8_t ch, uint8_t spsel)
     adc.ch        = ch;
     adc.spsel     = spsel;
     adc.samples   = ADC_DEFAULT_SAMPLES;   /* 8 = settle delay + averaging */
+    /* 0xFF = "nothing sampled yet", so the first read() always settles.
+     * Must be set here too: adc_init() only runs when the caller invokes
+     * init(), whereas read() may be called on a Create()-only object. */
+    adc.last_ch   = 0xFF;
     adc.init      = adc_init;
     adc.read      = adc_read;
     adc.setSamples= adc_set_samples;

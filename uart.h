@@ -74,10 +74,15 @@
 #define UART1_RX_PIN  0x40     /* PD6 bit mask */
 
 /* ========== Clock Register Addresses ==========
- * CLK_CKDIVR (0x50C6): HSIDIV[5:3] + CPUDIV[2:0]. uart_init must force
- * 0x00 so the UART clock is the full 16MHz HSI.
- * CLK_PCKENR1 bit2 = UART1EN: peripheral clock gate. */
-#define CLK_CKDIVR           (*(volatile uint8_t *)0x50C6)
+ * CLK_CKDIVR (0x50C6): HSIDIV[5:3] + CPUDIV[2:0]. Configured by the caller
+ * (main.c clock_setup() = 0x00, i.e. full-speed 16MHz HSI) before uart.init();
+ * uart_init() does NOT write this register. The BRR values below assume
+ * fck = 16MHz.
+ * CLK_PCKENR1 bit2 = UART1EN: peripheral clock gate, enabled by uart_init()
+ * with a read-modify-write so the other bits are left untouched.
+ * NOTE: no CLK_CKDIVR macro is defined here on purpose - this driver never
+ * writes the clock divider, so exposing the address would only invite a
+ * second writer (main.c owns it in clock_setup()). */
 #define CLK_PCKENR1          (*(volatile uint8_t *)0x50C7)
 #define CLK_PCKENR1_UART1EN  0x04   /* bit2 = UART1 clock enable (ST SPL: 0x04) */
 
